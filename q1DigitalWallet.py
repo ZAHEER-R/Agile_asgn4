@@ -3,95 +3,91 @@ import datetime
 class DigitalWallet:
     def __init__(self, account_id, pin, initial_balance=0.0, daily_limit=5000.0):
         self.account_id = account_id
-        self.pin = pin
+        self.__pin = pin
         self.balance = initial_balance
         self.daily_limit = daily_limit
-        self.transaction_history = []
+        self.daily_spent = 0.0
+        self.transactions = []
         self.failed_pin_attempts = 0
-        self.suspicious_flags = []
+        self.is_locked = False
 
-    def verify_pin(self, entered_pin):
-        if entered_pin != self.pin:
+    def verify_pin(self, pin):
+        if self.is_locked:
+            return False, "Account locked due to multiple failed PIN attempts."
+        if pin == self.__pin:
+            self.failed_pin_attempts = 0
+            return True, "PIN verified."
+        else:
             self.failed_pin_attempts += 1
             if self.failed_pin_attempts >= 3:
-                self.suspicious_flags.append("Multiple failed PIN attempts detected.")
-            return False
-        self.failed_pin_attempts = 0  # Reset counter on success
-        return True
+                self.is_locked = True
+                return False, "FLAG: Account locked - Multiple failed PIN attempts."
+            return False, f"Incorrect PIN. Attempt {self.failed_pin_attempts}/3."
 
-    def deposit(self, amount, pin):
-        if not self.verify_pin(pin):
-            raise ValueError("Invalid PIN.")
+    def _check_fraud_velocity(self):
+        now = datetime.datetime.now()
+        ten_mins_ago = now - datetime.timedelta(minutes=10)
+        recent_txs = [t for t in self.transactions if t['timestamp'] > ten_mins_ago]
+        return len(recent_txs) >= 5
+
+    def deposit(self, amount):
         if amount <= 0:
-            raise ValueError("Amount must be positive.")
-        
+            return False, "Invalid deposit amount."
         self.balance += amount
-        self._log_transaction("DEPOSIT", amount)
-        self._check_fraud("DEPOSIT", amount)
-        return self.balance
+        tx = {"type": "Deposit", "amount": amount, "timestamp": datetime.datetime.now()}
+        self.transactions.append(tx)
+        return True, f"Deposited ${amount}. New Balance: ${self.balance}"
 
     def withdraw(self, amount, pin):
-        if not self.verify_pin(pin):
-            raise ValueError("Invalid PIN.")
+        is_valid, msg = self.verify_pin(pin)
+        if not is_valid:
+            return False, msg
         if amount <= 0:
-            raise ValueError("Amount must be positive.")
+            return False, "Invalid withdrawal amount."
         if amount > self.balance:
-            raise ValueError("Insufficient balance.")
-        
-        # Verify daily limit
-        today = datetime.date.today()
-        today_total = sum(
-            t['amount'] for t in self.transaction_history 
-            if t['type'] == 'WITHDRAWAL' and t['date'] == today
-        )
-        if today_total + amount > self.daily_limit:
-            raise ValueError("Daily transaction limit exceeded.")
+            return False, "Insufficient balance."
+        if self.daily_spent + amount > self.daily_limit:
+            return False, "Daily transaction limit exceeded."
+
+        flags = []
+        if self._check_fraud_velocity():
+            flags.append("More than 5 transactions in 10 minutes")
+        if amount > 10000:
+            flags.append("Large transaction")
+        if amount % 1000 != 0 and amount > 3000:
+            flags.append("Unusual transaction amount")
 
         self.balance -= amount
-        self._log_transaction("WITHDRAWAL", amount)
-        self._check_fraud("WITHDRAWAL", amount)
-        return self.balance
+        self.daily_spent += amount
+        tx = {"type": "Withdrawal", "amount": amount, "timestamp": datetime.datetime.now()}
+        self.transactions.append(tx)
+
+        status = f"Withdrew ${amount}. Balance: ${self.balance}"
+        if flags:
+            status += f" | FLAG SUSPICIOUS: {', '.join(flags)}"
+        return True, status
 
     def transfer(self, target_wallet, amount, pin):
-        if not self.verify_pin(pin):
-            raise ValueError("Invalid PIN.")
+        is_valid, msg = self.verify_pin(pin)
+        if not is_valid:
+            return False, msg
         if amount <= 0:
-            raise ValueError("Amount must be positive.")
+            return False, "Invalid transfer amount."
         if amount > self.balance:
-            raise ValueError("Insufficient balance.")
+            return False, "Insufficient balance."
+        if self.daily_spent + amount > self.daily_limit:
+            return False, "Daily limit exceeded."
 
         self.balance -= amount
+        self.daily_spent += amount
         target_wallet.balance += amount
-        self._log_transaction("TRANSFER", amount)
-        self._check_fraud("TRANSFER", amount)
-        return self.balance
 
-    def get_balance(self):
-        return self.balance
-
-    def _log_transaction(self, tx_type, amount):
-        self.transaction_history.append({
-            'type': tx_type,
-            'amount': amount,
-            'timestamp': datetime.datetime.now(),
-            'date': datetime.date.today()
-        })
-
-    def _check_fraud(self, tx_type, amount):
         now = datetime.datetime.now()
-        
-        # Rule 1: More than 5 transactions in 10 minutes (600 seconds)
-        recent_txns = [
-            t for t in self.transaction_history 
-            if (now - t['timestamp']).total_seconds() <= 600
-        ]
-        if len(recent_txns) > 5:
-            self.suspicious_flags.append("High frequency: >5 transactions in 10 minutes.")
+        self.transactions.append({"type": f"Transfer to {target_wallet.account_id}", "amount": amount, "timestamp": now})
+        target_wallet.transactions.append({"type": f"Transfer from {self.account_id}", "amount": amount, "timestamp": now})
+        return True, f"Transferred ${amount} to {target_wallet.account_id}."
 
-        # Rule 2: Large transaction check (> 10,000)
-        if amount > 10000.0:
-            self.suspicious_flags.append(f"Large transaction detected: {amount}")
-
-        # Rule 3: Unusual amount relative to current balance
-        if amount > self.balance * 0.9 and amount > 4000:
-            self.suspicious_flags.append("Unusual transaction amount relative to balance.")
+if __name__ == "__main__":
+    wallet = DigitalWallet("ACC1001", pin="1234", initial_balance=2000.0, daily_limit=3000.0)
+    print(wallet.deposit(500))
+    print(wallet.withdraw(200, "1234"))
